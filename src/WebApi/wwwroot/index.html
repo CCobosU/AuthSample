@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Welcome</title>
+    <style>
+      body { font-family: Arial, Helvetica, sans-serif; background:#f7f9fc; color:#222; margin:0; padding:40px; }
+      .container { max-width:760px; margin:40px auto; background:white; border-radius:8px; padding:28px; box-shadow:0 4px 14px rgba(22,40,80,0.08); }
+      h1 { margin-top:0 }
+      p.lead { color:#555 }
+      footer { margin-top:24px; font-size:13px; color:#888 }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>AuthSample API</h1>
+      <p class="lead">This is the welcome page for the AuthSample Web API. The API is running.</p>
+      <p>Available endpoints: <a href="/swagger/index.html">OpenAPI (Swagger)</a> (if enabled for this environment).</p>
+      <footer>Environment: <strong id="env">unknown</strong></footer>
+    </div>
+    <script>
+      // Fetch environment name from the /env endpoint
+      fetch('/env').then(r => r.text()).then(t => {
+        document.getElementById('env').textContent = t || 'unknown';
+      }).catch(() => document.getElementById('env').textContent = 'unknown');
+    </script>
+  </body>
+</html>

@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# Permisos para poder publicar imágenes en GHCR con el token automático
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dotnet-version: ['8.0.x']
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2019-latest
+        env:
+          SA_PASSWORD: "Your_password123"
+          ACCEPT_EULA: "Y"
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd="/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P Your_password123 -Q 'SELECT 1'"
+          --health-interval=10s --health-timeout=5s --health-retries=5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.dotnet-version }}
+
+      - name: Install dotnet-ef tool
+        run: |
+          dotnet tool install --global dotnet-ef --version 8.0.0 || true
+          echo "::add-path::${HOME}/.dotnet/tools"
+
+      - name: Restore
+        run: dotnet restore AuthSample.sln
+
+      - name: Build
+        run: dotnet build AuthSample.sln --no-restore --configuration Release
+
+      - name: Wait for SQL Server
+        run: |
+          retries=0
+          SA_PASSWORD=${{ secrets.SQL_SA_PASSWORD || 'Your_password123' }}
+          until /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$SA_PASSWORD" -Q "SELECT 1" || [ $retries -ge 30 ]; do
+            echo "Waiting for SQL Server...";
+            sleep 2;
+            retries=$((retries+1));
+          done
+
+      - name: Apply EF Core migrations
+        env:
+          SA_PASSWORD: ${{ secrets.SQL_SA_PASSWORD || 'Your_password123' }}
+        run: |
+          # Ensure connection string points to the service SQL and apply migrations
+          ConnectionString="Server=localhost,1433;Database=AuthSampleDb;User Id=sa;Password=${SA_PASSWORD};TrustServerCertificate=True;"
+          dotnet ef database update --project src/Infrastructure/Infrastructure.csproj --startup-project src/WebApi/WebApi.csproj --connection "$ConnectionString"
+
+      - name: Run tests
+        env:
+          ConnectionStrings__DefaultConnection: "Server=localhost,1433;Database=AuthSampleDb;User Id=sa;Password=${{ secrets.SQL_SA_PASSWORD || 'Your_password123' }};TrustServerCertificate=True;"
+        run: dotnet test tests/Tests.csproj --no-build --verbosity normal
+
+      - name: Publish WebApi artifact
+        run: dotnet publish src/WebApi/WebApi.csproj -c Release -o ./publish
+
+      - name: Create BUILD_INFO.json
+        run: |
+          TAG=$(git describe --tags --exact-match 2>/dev/null || true)
+          if [ -n "$TAG" ]; then
+            VERSION=$TAG
+          else
+            VERSION=$(git rev-parse --short HEAD)
+          fi
+          COMMIT=$(git rev-parse --short HEAD)
+          mkdir -p src/WebApi
+          cat > src/WebApi/BUILD_INFO.json <<EOF
+{
+  "version": "$VERSION",
+  "commit": "$COMMIT"
+}
+EOF
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapi-build
+          path: |
+            publish/
+            src/WebApi/BUILD_INFO.json
+
+  docker:
+    name: Build and Push Docker image (only on main)
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: webapi-build
+          path: .
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # Prefer a PAT secret if provided, otherwise fall back to the automatic token
+          password: ${{ secrets.GITHUB_TOKEN_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Get git tag if exists
+        id: tagged
+        run: |
+          TAG=$(git describe --tags --exact-match 2>/dev/null || true)
+          if [ -n "$TAG" ]; then
+            echo "Found tag: $TAG"
+            echo "::set-output name=tag::ghcr.io/${{ github.repository }}/webapi:$TAG"
+          else
+            echo "No tag"
+            echo "::set-output name=tag::"
+          fi
+
+      - name: Build and push image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./
+          file: ./src/WebApi/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/webapi:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/webapi:latest
+            ${{ steps.tagged.outputs.tag || '' }}
+
+      - name: Upload publish artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapi-publish
+          path: publish/
